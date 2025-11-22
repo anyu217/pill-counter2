@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>藥物計數器 V3 (金屬盤專用版)</title>
+    <style>
+        body { margin: 0; background-color: #000; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+        video { display: none; }
+        canvas { width: 100%; max-width: 640px; border: 1px solid #333; }
+        .ui-container { position: fixed; bottom: 0; width: 100%; background: rgba(20,20,20,0.9); padding: 10px 0; border-radius: 20px 20px 0 0; }
+        .count-box { font-size: 36px; font-weight: bold; color: #0f0; text-align: center; margin: 5px 0; }
+        .control-group { display: flex; flex-wrap: wrap; justify-content: space-around; padding: 0 10px; font-size: 11px; }
+        .control-item { width: 45%; margin-bottom: 8px; display: flex; flex-direction: column; align-items: center; }
+        input[type="range"] { width: 100%; }
+        #status { position: absolute; top: 40%; width: 100%; text-align: center; color: #aaa; }
+        .hint { font-size: 10px; color: #888; text-align: center; width: 100%; }
+    </style>
+</head>
+<body>
+
+    <div id="status">正在載入 OpenCV...</div>
+    <video id="videoInput" playsinline webkit-playsinline></video>
+    <canvas id="canvasOutput"></canvas>
+
+    <div class="ui-container">
+        <div class="count-box"><span id="countDisplay">0</span> 顆</div>
+        
+        <div class="control-group">
+            <div class="control-item">
+                <label>光照適應範圍 (Block): <span id="blockVal">31</span></label>
+                <input type="range" id="blockSizeRange" min="3" max="99" step="2" value="31">
+            </div>
+            <div class="control-item">
+                <label>背景剔除強度 (C): <span id="cVal">2</span></label>
+                <input type="range" id="cRange" min="0" max="20" value="2">
+            </div>
+            <div class="control-item">
+                <label>分離黏著 (Erode): <span id="erodeVal">4</span></label>
+                <input type="range" id="erodeRange" min="0" max="10" value="4">
+            </div>
+            <div class="control-item">
+                <label>圓度要求 (Circularity): <span id="circVal">0.5</span></label>
+                <input type="range" id="circRange" min="0.1" max="0.9" step="0.1" value="0.5">
+            </div>
+        </div>
+        <div class="hint">若反光太嚴重，請嘗試調整拍攝角度</div>
+    </div>
+
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();"></script>
+
+    <script type="text/javascript">
+        let video = document.getElementById('videoInput');
+        let canvas = document.getElementById('canvasOutput');
+        let countDisplay = document.getElementById('countDisplay');
+        let statusText = document.getElementById('status');
+
+        let config = {
+            blockSize: 31, // 必須是奇數
+            cValue: 2,     // 從平均值減去的常數
+            erodeSize: 4,
+            minCircularity: 0.5,
+            minArea: 150   // 最小面積
+        };
+
+        document.getElementById('blockSizeRange').oninput = (e) => { 
+            let val = parseInt(e.target.value);
+            if(val % 2 === 0) val++; // 強制奇數
+            config.blockSize = val; 
+            document.getElementById('blockVal').innerText = val; 
+        };
+        document.getElementById('cRange').oninput = (e) => { config.cValue = parseInt(e.target.value); document.getElementById('cVal').innerText = config.cValue; };
+        document.getElementById('erodeRange').oninput = (e) => { config.erodeSize = parseInt(e.target.value); document.getElementById('erodeVal').innerText = config.erodeSize; };
+        document.getElementById('circRange').oninput = (e) => { config.minCircularity = parseFloat(e.target.value); document.getElementById('circVal').innerText = config.minCircularity; };
+
+        function onOpenCvReady() { statusText.innerText = '啟動相機...'; startCamera(); }
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false
+                });
+                video.srcObject = stream;
+                video.play();
+                video.onloadedmetadata = () => {
+                    statusText.style.display = 'none';
+                    video.width = video.videoWidth; video.height = video.videoHeight;
+                    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+                    processVideo();
+                };
+            } catch (err) { statusText.innerText = '錯誤: ' + err; }
+        }
+
+        function processVideo() {
+            let src = new cv.Mat(video.height, video.width, cv.CV_8UC4);
+            let gray = new cv.Mat();
+            let binary = new cv.Mat();
+            let cap = new cv.VideoCapture(video);
+            let anchor = new cv.Point(-1, -1);
+
+            const FPS = 30;
+
+            function loop() {
+                try {
+                    let start = Date.now();
+                    cap.read(src);
+                    
+                    // 1. 轉灰階
+                    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                    
+                    // 2. 強力高斯模糊 (對抗金屬刮痕)
+                    // 針對金屬盤，我們需要稍微強一點的模糊來抹平刮痕
+                    cv.GaussianBlur(gray, gray, new cv.Size(7, 7), 0);
+
+                    // 3. 自適應二值化 (Adaptive Threshold) - 核心技術！
+                    // ADAPTIVE_THRESH_GAUSSIAN_C: 計算鄰域的加權平均
+                    // blockSize: 決定看多大的區域來決定亮度 (越大越能抵抗不均勻光線)
+                    cv.adaptiveThreshold(gray, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, config.blockSize, config.cValue);
+
+                    // 4. 腐蝕 (Erode) - 分離藥丸 / 消除小白點噪聲
+                    if(config.erodeSize > 0) {
+                        let kernel = cv.Mat.ones(config.erodeSize, config.erodeSize, cv.CV_8U);
+                        cv.erode(binary, binary, kernel, anchor, 1);
+                        kernel.delete();
+                    }
+
+                    // 5. 尋找輪廓
+                    let contours = new cv.MatVector();
+                    let hierarchy = new cv.Mat();
+                    cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                    let count = 0;
+                    let displayMat = src.clone();
+
+                    for (let i = 0; i < contours.size(); ++i) {
+                        let cnt = contours.get(i);
+                        let area = cv.contourArea(cnt);
+                        
+                        if (area > config.minArea) {
+                            // 計算圓形度 (Circularity)
+                            // 公式: 4 * pi * Area / (Perimeter^2)
+                            // 正圓 = 1.0, 正方形 = 0.78, 長條形/亂七八糟形 < 0.5
+                            let perimeter = cv.arcLength(cnt, true);
+                            let circularity = 0;
+                            if (perimeter > 0) {
+                                circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+                            }
+
+                            // 判斷條件：面積夠大 且 形狀夠圓
+                            if (circularity > config.minCircularity) {
+                                count++;
+                                
+                                // 畫圓框 (使用最小外接圓，看起來比較專業)
+                                let circle = cv.minEnclosingCircle(cnt);
+                                cv.circle(displayMat, circle.center, circle.radius, new cv.Scalar(0, 255, 0, 255), 2);
+                                
+                                // 在藥丸中心寫上數字 (除錯用，也可不寫)
+                                // cv.putText(displayMat, String(count), circle.center, cv.FONT_HERSHEY_SIMPLEX, 0.5, new cv.Scalar(255, 0, 0, 255), 1);
+                            } else {
+                                // (除錯用) 畫出被剔除的輪廓(紅色)，方便你知道為什麼它沒被算進去
+                                // let rect = cv.boundingRect(cnt);
+                                // let p1 = new cv.Point(rect.x, rect.y);
+                                // let p2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
+                                // cv.rectangle(displayMat, p1, p2, new cv.Scalar(255, 0, 0, 255), 1);
+                            }
+                        }
+                    }
+
+                    cv.imshow('canvasOutput', displayMat);
+                    countDisplay.innerText = count;
+
+                    displayMat.delete(); contours.delete(); hierarchy.delete();
+                    setTimeout(loop, 1000/FPS - (Date.now() - start));
+
+                } catch(e) { console.error(e); }
+            }
+            loop();
+        }
+    </script>
+</body>
+</html>
