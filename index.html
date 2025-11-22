@@ -3,36 +3,79 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>藥物計數器 V3 (金屬盤專用版)</title>
+    <title>藥物計數器 V3.1 (拍照存檔版)</title>
     <style>
         body { margin: 0; background-color: #000; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
         video { display: none; }
-        canvas { width: 100%; max-width: 640px; border: 1px solid #333; }
-        .ui-container { position: fixed; bottom: 0; width: 100%; background: rgba(20,20,20,0.9); padding: 10px 0; border-radius: 20px 20px 0 0; }
-        .count-box { font-size: 36px; font-weight: bold; color: #0f0; text-align: center; margin: 5px 0; }
-        .control-group { display: flex; flex-wrap: wrap; justify-content: space-around; padding: 0 10px; font-size: 11px; }
+        /* 畫布容器 */
+        .canvas-wrapper { position: relative; width: 100%; max-width: 640px; }
+        canvas { width: 100%; height: auto; border: 1px solid #333; display: block; }
+        
+        /* 閃光燈特效層 */
+        #flash-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: white; opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10;
+        }
+
+        /* UI 容器 */
+        .ui-container { 
+            position: fixed; bottom: 0; width: 100%; 
+            background: rgba(20,20,20,0.95); 
+            padding: 10px 0 20px 0; 
+            border-radius: 20px 20px 0 0; 
+            z-index: 20;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* 數量顯示 */
+        .count-box { font-size: 36px; font-weight: bold; color: #0f0; margin: 5px 0; text-shadow: 0 0 10px rgba(0,255,0,0.5); }
+
+        /* 拍照按鈕 */
+        .snap-btn {
+            background: linear-gradient(135deg, #ffffff, #e0e0e0);
+            color: #333; border: none;
+            padding: 10px 40px; border-radius: 50px;
+            font-size: 18px; font-weight: bold;
+            margin-bottom: 15px; cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            display: flex; align-items: center; gap: 8px;
+        }
+        .snap-btn:active { transform: scale(0.95); background: #ccc; }
+
+        /* 控制項排版 */
+        .control-group { display: flex; flex-wrap: wrap; justify-content: space-around; width: 100%; font-size: 11px; padding: 0 10px; box-sizing: border-box; }
         .control-item { width: 45%; margin-bottom: 8px; display: flex; flex-direction: column; align-items: center; }
-        input[type="range"] { width: 100%; }
-        #status { position: absolute; top: 40%; width: 100%; text-align: center; color: #aaa; }
-        .hint { font-size: 10px; color: #888; text-align: center; width: 100%; }
+        input[type="range"] { width: 100%; accent-color: #0f0; }
+        
+        #status { position: absolute; top: 40%; width: 100%; text-align: center; color: #aaa; z-index: 5; }
     </style>
 </head>
 <body>
 
-    <div id="status">正在載入 OpenCV...</div>
-    <video id="videoInput" playsinline webkit-playsinline></video>
-    <canvas id="canvasOutput"></canvas>
+    <div id="status">系統載入中...</div>
+
+    <div class="canvas-wrapper">
+        <div id="flash-overlay"></div>
+        <video id="videoInput" playsinline webkit-playsinline></video>
+        <canvas id="canvasOutput"></canvas>
+    </div>
 
     <div class="ui-container">
         <div class="count-box"><span id="countDisplay">0</span> 顆</div>
         
+        <button id="snapBtn" class="snap-btn">
+            <span>📸</span> 拍照存檔
+        </button>
+        
         <div class="control-group">
             <div class="control-item">
-                <label>光照適應範圍 (Block): <span id="blockVal">31</span></label>
+                <label>光照適應 (Block): <span id="blockVal">31</span></label>
                 <input type="range" id="blockSizeRange" min="3" max="99" step="2" value="31">
             </div>
             <div class="control-item">
-                <label>背景剔除強度 (C): <span id="cVal">2</span></label>
+                <label>背景剔除 (C): <span id="cVal">2</span></label>
                 <input type="range" id="cRange" min="0" max="20" value="2">
             </div>
             <div class="control-item">
@@ -40,11 +83,10 @@
                 <input type="range" id="erodeRange" min="0" max="10" value="4">
             </div>
             <div class="control-item">
-                <label>圓度要求 (Circularity): <span id="circVal">0.5</span></label>
+                <label>圓度要求 (Circ): <span id="circVal">0.5</span></label>
                 <input type="range" id="circRange" min="0.1" max="0.9" step="0.1" value="0.5">
             </div>
         </div>
-        <div class="hint">若反光太嚴重，請嘗試調整拍攝角度</div>
     </div>
 
     <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();"></script>
@@ -54,31 +96,54 @@
         let canvas = document.getElementById('canvasOutput');
         let countDisplay = document.getElementById('countDisplay');
         let statusText = document.getElementById('status');
+        let snapBtn = document.getElementById('snapBtn');
+        let flashOverlay = document.getElementById('flash-overlay');
+
+        // 全域變數紀錄當前數量，供拍照使用
+        let currentPillCount = 0;
 
         let config = {
-            blockSize: 31, // 必須是奇數
-            cValue: 2,     // 從平均值減去的常數
+            blockSize: 31, 
+            cValue: 2,     
             erodeSize: 4,
             minCircularity: 0.5,
-            minArea: 150   // 最小面積
+            minArea: 150
         };
 
+        // UI 事件綁定
         document.getElementById('blockSizeRange').oninput = (e) => { 
-            let val = parseInt(e.target.value);
-            if(val % 2 === 0) val++; // 強制奇數
-            config.blockSize = val; 
-            document.getElementById('blockVal').innerText = val; 
+            let val = parseInt(e.target.value); if(val%2===0) val++; 
+            config.blockSize = val; document.getElementById('blockVal').innerText = val; 
         };
         document.getElementById('cRange').oninput = (e) => { config.cValue = parseInt(e.target.value); document.getElementById('cVal').innerText = config.cValue; };
         document.getElementById('erodeRange').oninput = (e) => { config.erodeSize = parseInt(e.target.value); document.getElementById('erodeVal').innerText = config.erodeSize; };
         document.getElementById('circRange').oninput = (e) => { config.minCircularity = parseFloat(e.target.value); document.getElementById('circVal').innerText = config.minCircularity; };
+
+        // 拍照功能實作
+        snapBtn.onclick = () => {
+            // 1. 閃光燈特效
+            flashOverlay.style.opacity = 0.8;
+            setTimeout(() => { flashOverlay.style.opacity = 0; }, 100);
+
+            // 2. 產生檔名 (時間 + 數量)
+            let now = new Date();
+            let timeStr = `${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}${now.getMinutes().toString().padStart(2,'0')}`;
+            let filename = `藥物計數_${timeStr}_數量${currentPillCount}.png`;
+
+            // 3. 下載圖片
+            // 因為我們已經在 canvas 上繪製了文字，直接下載 canvas 內容即可
+            let link = document.createElement('a');
+            link.download = filename;
+            link.href = canvas.toDataURL("image/png");
+            link.click();
+        };
 
         function onOpenCvReady() { statusText.innerText = '啟動相機...'; startCamera(); }
 
         async function startCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
                 });
                 video.srcObject = stream;
                 video.play();
@@ -105,26 +170,16 @@
                     let start = Date.now();
                     cap.read(src);
                     
-                    // 1. 轉灰階
                     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-                    
-                    // 2. 強力高斯模糊 (對抗金屬刮痕)
-                    // 針對金屬盤，我們需要稍微強一點的模糊來抹平刮痕
                     cv.GaussianBlur(gray, gray, new cv.Size(7, 7), 0);
-
-                    // 3. 自適應二值化 (Adaptive Threshold) - 核心技術！
-                    // ADAPTIVE_THRESH_GAUSSIAN_C: 計算鄰域的加權平均
-                    // blockSize: 決定看多大的區域來決定亮度 (越大越能抵抗不均勻光線)
                     cv.adaptiveThreshold(gray, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, config.blockSize, config.cValue);
 
-                    // 4. 腐蝕 (Erode) - 分離藥丸 / 消除小白點噪聲
                     if(config.erodeSize > 0) {
                         let kernel = cv.Mat.ones(config.erodeSize, config.erodeSize, cv.CV_8U);
                         cv.erode(binary, binary, kernel, anchor, 1);
                         kernel.delete();
                     }
 
-                    // 5. 尋找輪廓
                     let contours = new cv.MatVector();
                     let hierarchy = new cv.Mat();
                     cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
@@ -137,37 +192,38 @@
                         let area = cv.contourArea(cnt);
                         
                         if (area > config.minArea) {
-                            // 計算圓形度 (Circularity)
-                            // 公式: 4 * pi * Area / (Perimeter^2)
-                            // 正圓 = 1.0, 正方形 = 0.78, 長條形/亂七八糟形 < 0.5
                             let perimeter = cv.arcLength(cnt, true);
-                            let circularity = 0;
-                            if (perimeter > 0) {
-                                circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-                            }
+                            let circularity = (perimeter > 0) ? (4 * Math.PI * area) / (perimeter * perimeter) : 0;
 
-                            // 判斷條件：面積夠大 且 形狀夠圓
                             if (circularity > config.minCircularity) {
                                 count++;
-                                
-                                // 畫圓框 (使用最小外接圓，看起來比較專業)
                                 let circle = cv.minEnclosingCircle(cnt);
-                                cv.circle(displayMat, circle.center, circle.radius, new cv.Scalar(0, 255, 0, 255), 2);
                                 
-                                // 在藥丸中心寫上數字 (除錯用，也可不寫)
-                                // cv.putText(displayMat, String(count), circle.center, cv.FONT_HERSHEY_SIMPLEX, 0.5, new cv.Scalar(255, 0, 0, 255), 1);
-                            } else {
-                                // (除錯用) 畫出被剔除的輪廓(紅色)，方便你知道為什麼它沒被算進去
-                                // let rect = cv.boundingRect(cnt);
-                                // let p1 = new cv.Point(rect.x, rect.y);
-                                // let p2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
-                                // cv.rectangle(displayMat, p1, p2, new cv.Scalar(255, 0, 0, 255), 1);
+                                // 畫圓圈
+                                cv.circle(displayMat, circle.center, circle.radius, new cv.Scalar(0, 255, 0, 255), 2);
                             }
                         }
                     }
 
-                    cv.imshow('canvasOutput', displayMat);
+                    // 更新全域變數
+                    currentPillCount = count;
                     countDisplay.innerText = count;
+
+                    // --- 將數據燒錄到畫面左上角 ---
+                    // 這樣截圖時，圖片裡面就會有文字
+                    let dateText = new Date().toLocaleString();
+                    let countText = `Count: ${count}`;
+                    
+                    // 文字背景黑框 (增加可讀性)
+                    cv.rectangle(displayMat, new cv.Point(0, 0), new cv.Point(220, 70), new cv.Scalar(0, 0, 0, 255), -1);
+                    
+                    // 寫入日期
+                    cv.putText(displayMat, dateText, new cv.Point(10, 25), cv.FONT_HERSHEY_SIMPLEX, 0.5, new cv.Scalar(255, 255, 255, 255), 1);
+                    // 寫入數量 (大字)
+                    cv.putText(displayMat, countText, new cv.Point(10, 60), cv.FONT_HERSHEY_SIMPLEX, 1.0, new cv.Scalar(0, 255, 0, 255), 2);
+                    // -----------------------------
+
+                    cv.imshow('canvasOutput', displayMat);
 
                     displayMat.delete(); contours.delete(); hierarchy.delete();
                     setTimeout(loop, 1000/FPS - (Date.now() - start));
